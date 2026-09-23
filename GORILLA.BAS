@@ -47,6 +47,8 @@ DECLARE FUNCTION ExplodeGorilla (x#, y#)
 DECLARE FUNCTION Getn# (Row, Col)
 DECLARE FUNCTION PlotShot (StartX, StartY, Angle#, Velocity, PlayerNum)
 DECLARE FUNCTION CalcDelay! ()
+DECLARE SUB FindShot (PlayerNum, StartX, StartY, TargetX, TargetY, FixedAngle)
+DECLARE FUNCTION CheckWinningPath (StartX, StartY, UserAngle, Velocity, PlayerNum)
 
 'Make all arrays Dynamic
 '$DYNAMIC
@@ -85,6 +87,10 @@ DIM SHARED GorR&(120)        'Gorilla right arm raised
 
 DIM SHARED gravity#
 DIM SHARED Wind
+DIM SHARED SuggestedAngle$
+DIM SHARED SuggestedVelocity$
+DIM SHARED ShotPlayer, ShotX, ShotY   'Dados do tiro atual, usados pela tecla S
+DIM SHARED TypedAngle
 
 'Screen Mode Variables
 DIM SHARED ScrHeight
@@ -288,9 +294,22 @@ FUNCTION DoShot (PlayerNum, x, y)
     END IF
   END IF
 
+  'A solucao so e calculada quando o jogador aperta S (ver GetNum).
+  SuggestedAngle$ = ""
+  SuggestedVelocity$ = ""
+  ShotPlayer = PlayerNum
+  ShotX = x
+  ShotY = y
+
   LOCATE 2, LocateCol
   PRINT "Angle:";
   Angle# = GetNum#(2, LocateCol + 7)
+  TypedAngle = CINT(Angle#)
+
+  'Se o angulo aceito for o sugerido, a velocidade ja vem preenchida.
+  IF SuggestedAngle$ = "" OR VAL(SuggestedAngle$) <> Angle# THEN
+    SuggestedVelocity$ = ""
+  END IF
 
   LOCATE 3, LocateCol
   PRINT "Velocity:";
@@ -530,7 +549,12 @@ END SUB
 'Parameters:
 '  Row, Col - location to echo input
 FUNCTION GetNum# (Row, Col)
+  'If the solver found a shot, start with its value already typed.
   Result$ = ""
+  IF Row = 3 THEN
+    Result$ = SuggestedVelocity$
+    SuggestedVelocity$ = ""
+  END IF
   Done = FALSE
   WHILE INKEY$ <> "": WEND   'Clear keyboard buffer
 
@@ -552,6 +576,31 @@ FUNCTION GetNum# (Row, Col)
           Result$ = ""
         ELSE
           Done = TRUE
+        END IF
+      CASE "s", "S"
+        'Tecla de atalho: calcula a solucao e preenche o campo.
+        '  No campo Angle: angulo e velocidade sugeridos.
+        '  No campo Velocity: velocidade para o angulo digitado.
+        IF Row = 2 THEN
+          SuggestedAngle$ = ""
+          SuggestedVelocity$ = ""
+          FindShot ShotPlayer, ShotX, ShotY, GorillaX(3 - ShotPlayer), GorillaY(3 - ShotPlayer), 0
+          IF SuggestedAngle$ <> "" THEN
+            Result$ = SuggestedAngle$
+          ELSE
+            BEEP
+          END IF
+        ELSE
+          SuggestedAngle$ = ""
+          SuggestedVelocity$ = ""
+          IF TypedAngle >= 1 AND TypedAngle <= 179 THEN
+            FindShot ShotPlayer, ShotX, ShotY, GorillaX(3 - ShotPlayer), GorillaY(3 - ShotPlayer), TypedAngle
+          END IF
+          IF SuggestedVelocity$ <> "" THEN
+            Result$ = SuggestedVelocity$
+          ELSE
+            BEEP
+          END IF
         END IF
       CASE CHR$(8)
         IF LEN(Result$) > 0 THEN
@@ -891,6 +940,142 @@ SUB PlayGame (Player1$, Player2$, NumGames)
   COLOR 7, 0
   CLS
 END SUB
+
+' FindShot:
+'   Procura um tiro que acerte o gorila adversario e deixa angulo e
+'   velocidade prontos nos campos de entrada.
+'   Para cada angulo, a velocidade sai direto da equacao da trajetoria
+'   (sem varredura). Os angulos sao testados a partir de 45 graus e a
+'   busca para no primeiro tiro confirmado por CheckWinningPath.
+SUB FindShot (PlayerNum, StartX, StartY, TargetX, TargetY, FixedAngle)
+
+  StartXPos = StartX
+  StartYPos = StartY - Scl(4) - 3
+  IF PlayerNum = 2 THEN StartXPos = StartXPos + Scl(25)
+
+  'Mira no centro do gorila adversario
+  dx# = (TargetX + Scl(15)) - StartXPos
+  dy# = ((TargetY + Scl(14)) - StartYPos) / (ScrHeight / 350)
+  w# = Wind / 5
+
+  'FixedAngle > 0: so calcula a velocidade para esse angulo.
+  IF FixedAngle > 0 THEN
+    kMax = 0
+    dMax = 16
+  ELSE
+    kMax = 80
+    dMax = 6
+  END IF
+
+  FOR k = 0 TO kMax
+    'Ordem: 45, 46, 44, 47, 43, ... ate cobrir 5 a 85
+    IF FixedAngle > 0 THEN
+      UserAngle = FixedAngle
+    ELSEIF k MOD 2 = 0 THEN
+      UserAngle = 45 + k \ 2
+    ELSE
+      UserAngle = 45 - (k + 1) \ 2
+    END IF
+
+    IF UserAngle >= 1 AND UserAngle <= 179 AND UserAngle <> 90 THEN
+      IF PlayerNum = 1 THEN
+        RealAngle# = UserAngle / 180 * pi#
+      ELSE
+        RealAngle# = (180 - UserAngle) / 180 * pi#
+      END IF
+      c# = COS(RealAngle#)
+      tn# = TAN(RealAngle#)
+
+      den# = .5 * (w# * tn# + gravity#)
+      IF den# > 0 THEN
+        T2# = (dy# + tn# * dx#) / den#
+        IF T2# > 0 THEN
+          FT# = SQR(T2#)
+          V# = (dx# - .5 * w# * T2#) / (c# * FT#)
+          IF V# >= 2 AND V# <= 150 THEN
+            'Testa inteiros proximos, do mais perto para o mais longe
+            BaseV = CINT(V#)
+            FOR d = 0 TO dMax
+              IF d MOD 2 = 0 THEN
+                TestV = BaseV + d \ 2
+              ELSE
+                TestV = BaseV - (d + 1) \ 2
+              END IF
+              IF TestV >= 2 THEN
+                IF CheckWinningPath(StartX, StartY, UserAngle, TestV, PlayerNum) THEN
+                  SuggestedAngle$ = LTRIM$(STR$(UserAngle))
+                  SuggestedVelocity$ = LTRIM$(STR$(TestV))
+                  EXIT SUB
+                END IF
+              END IF
+            NEXT d
+          END IF
+        END IF
+      END IF
+    END IF
+  NEXT k
+
+END SUB
+
+' CheckWinningPath:
+'   Simula o tiro exatamente como PlotShot (mesmo passo de tempo e
+'   mesma deteccao de colisao), sem desenhar. Retorna TRUE so se o
+'   primeiro impacto for no gorila adversario.
+FUNCTION CheckWinningPath (StartX, StartY, UserAngle, Velocity, PlayerNum)
+
+  CheckWinningPath = FALSE
+
+  IF PlayerNum = 1 THEN
+    RealAngle# = UserAngle / 180 * pi#
+  ELSE
+    RealAngle# = (180 - UserAngle) / 180 * pi#
+  END IF
+
+  InitXVel# = COS(RealAngle#) * Velocity
+  InitYVel# = SIN(RealAngle#) * Velocity
+
+  StartXPos = StartX
+  StartYPos = StartY - Scl(4) - 3
+  IF PlayerNum = 2 THEN
+    StartXPos = StartXPos + Scl(25)
+    direction = Scl(4)
+  ELSE
+    direction = Scl(-4)
+  END IF
+
+  t# = 0
+  FOR Iter = 1 TO 3000
+    x# = StartXPos + (InitXVel# * t#) + (.5 * (Wind / 5) * t# ^ 2)
+    y# = StartYPos + ((-1 * (InitYVel# * t#)) + (.5 * gravity# * t# ^ 2)) * (ScrHeight / 350)
+
+    IF (x# >= ScrWidth - Scl(10)) OR (x# <= 3) OR (y# >= ScrHeight - 3) THEN EXIT FUNCTION
+
+    IF y# > 0 THEN
+      Impact = FALSE
+      LookY = 0
+      LookX = Scl(8 * (2 - PlayerNum))
+      DO
+        pointval = POINT(x# + LookX, y# + LookY)
+        IF pointval <> 0 THEN
+          IF pointval <> SUNATTR OR y# >= SunHt THEN Impact = TRUE
+        END IF
+        LookX = LookX + direction
+        LookY = LookY + Scl(6)
+      LOOP UNTIL Impact OR LookX <> Scl(4)
+
+      IF Impact THEN
+        IF pointval = OBJECTCOLOR THEN
+          IF x# < ScrWidth / 2 THEN HitPlayer = 1 ELSE HitPlayer = 2
+          IF HitPlayer <> PlayerNum THEN CheckWinningPath = TRUE
+        END IF
+        EXIT FUNCTION
+      END IF
+    END IF
+
+    t# = t# + .1
+  NEXT Iter
+
+END FUNCTION
 
 'PlayGame:
 '  Plots banana shot across the screen
